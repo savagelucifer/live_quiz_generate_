@@ -57,7 +57,11 @@ Return JSON only:
 Generation request id: ${requestId}`;
 }
 
-async function tryGenerateWithRetry(apiKey: string, prompt: string, maxRetries = 3): Promise<{ questions: QuizQuestion[] } | null> {
+async function tryGenerateWithRetry(
+  apiKey: string,
+  prompt: string,
+  maxRetries = 3
+): Promise<{ questions: QuizQuestion[] }> {
   let lastError = "Unknown Gemini error.";
 
   for (const model of MODELS) {
