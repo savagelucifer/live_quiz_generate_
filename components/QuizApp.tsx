@@ -35,7 +35,9 @@ export function QuizApp() {
   const [roomTimeLimit, setRoomTimeLimit] = useState(15);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const startTimeRef = useRef<number>(0);\n  const clientIdRef = useRef<string>("");\n  const roomIdRef = useRef<string>("");
+  const startTimeRef = useRef<number>(0);
+  const clientIdRef = useRef<string>("");
+  const roomIdRef = useRef<string>("");
 
   useEffect(() => {
     // Connect to Socket.IO server
@@ -61,8 +63,10 @@ export function QuizApp() {
       setRoomTimeLimit(limit);
       
       // Start timer
-      setTimeRemaining(limit);
-      startTimeRef.current = Date.now();
+      const startedAtMs = Number(startedAt) || Date.now();
+      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
+      setTimeRemaining(Math.max(0, limit - elapsedSeconds));
+      startTimeRef.current = startedAtMs;
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = setInterval(() => {
         setTimeRemaining((prev) => {
@@ -82,7 +86,16 @@ export function QuizApp() {
       if (timerRef.current) clearInterval(timerRef.current);
     });
 
-    newSocket.on("room_error", (message: string) => {\n      alert(message);\n      setRoomState("menu");\n    });\n\n    newSocket.on("connect", () => {\n      if (roomIdRef.current) newSocket.emit("sync_room", { roomId: roomIdRef.current, clientId: clientIdRef.current });\n    });\n\n    newSocket.on("quiz_ended", (finalPlayers: Player[]) => {
+    newSocket.on("room_error", (message: string) => {
+      alert(message);
+      setRoomState("menu");
+    });
+
+    newSocket.on("connect", () => {
+      if (roomIdRef.current) newSocket.emit("sync_room", { roomId: roomIdRef.current, clientId: clientIdRef.current });
+    });
+
+    newSocket.on("quiz_ended", (finalPlayers: Player[]) => {
       setPlayers(finalPlayers);
       setRoomState("ended");
       if (timerRef.current) clearInterval(timerRef.current);
@@ -99,13 +112,15 @@ export function QuizApp() {
     const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
     setRoomId(newRoomId);
     setIsHost(true);
-    socket.emit("create_room", { roomId: newRoomId, hostName: username });
+    roomIdRef.current = newRoomId;
+    socket.emit("create_room", { roomId: newRoomId, hostName: username, clientId: clientIdRef.current });
     setRoomState("waiting");
   };
 
   const handleJoinRoom = () => {
     if (!username.trim() || !roomId.trim() || !socket) return;
-    roomIdRef.current = roomId.toUpperCase();\n    socket.emit("join_room", { roomId: roomId.toUpperCase(), username, clientId: clientIdRef.current });
+    roomIdRef.current = roomId.toUpperCase();
+    socket.emit("join_room", { roomId: roomId.toUpperCase(), username, clientId: clientIdRef.current });
     setRoomState("waiting");
   };
 
