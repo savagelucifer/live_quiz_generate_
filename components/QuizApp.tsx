@@ -138,9 +138,16 @@ export function QuizApp() {
       });
       
       const data = await response.json();
-      
-      if (data.questions) {
+
+      if (!response.ok || data.error) {
+        window.alert(data.error || "Could not generate the quiz. Please try again.");
+        return;
+      }
+
+      if (Array.isArray(data.questions) && data.questions.length > 0) {
         socket.emit("quiz_started", { roomId, questions: data.questions, timeLimit });
+      } else {
+        window.alert("Gemini returned no questions. Please try again.");
       }
     } catch (error) {
       console.error("Error generating quiz:", error);
