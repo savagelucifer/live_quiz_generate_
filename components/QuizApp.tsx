@@ -52,7 +52,8 @@ export function QuizApp() {
       setRoomState("playing");
     });
 
-    newSocket.on("receive_question", ({ questionIndex, question, timeLimit: serverTimeLimit, startedAt }) => {
+    newSocket.on("receive_question", (payload: { questionIndex: number; question: Question; timeLimit?: number; startedAt?: number }) => {
+      const { questionIndex, question, timeLimit: serverTimeLimit, startedAt } = payload;
       setCurrentQuestion(question);
       setQuestionIndex(questionIndex);
       setRoomState("playing");
