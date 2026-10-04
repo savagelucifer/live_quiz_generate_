@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { io, Socket } from "socket.io-client";
+import { createRealtimeClient, type RealtimeClient } from "@/lib/realtime-client";
 import { motion, AnimatePresence } from "framer-motion";
 import { Loader2, Users, Play, Trophy, Sparkles, CheckCircle2, XCircle } from "lucide-react";
 
@@ -16,7 +16,7 @@ type Question = { question_text: string; options: string[] };
 type RoundResult = { correct_answer: string; explanation: string; players: Player[] };
 
 export function QuizApp() {
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const [socket, setSocket] = useState<RealtimeClient | null>(null);
   const [username, setUsername] = useState("");
   const [roomId, setRoomId] = useState("");
   const [roomState, setRoomState] = useState<"menu" | "waiting" | "playing" | "round_results" | "ended">("menu");
@@ -35,7 +35,7 @@ export function QuizApp() {
   const [roomTimeLimit, setRoomTimeLimit] = useState(15);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const startTimeRef = useRef<number>(0);
+  const startTimeRef = useRef<number>(0);\n  const clientIdRef = useRef<string>("");\n  const roomIdRef = useRef<string>("");
 
   useEffect(() => {
     // Connect to Socket.IO server
@@ -50,7 +50,7 @@ export function QuizApp() {
       setRoomState("playing");
     });
 
-    newSocket.on("receive_question", ({ questionIndex, question, timeLimit: serverTimeLimit }) => {
+    newSocket.on("receive_question", ({ questionIndex, question, timeLimit: serverTimeLimit, startedAt }) => {
       setCurrentQuestion(question);
       setQuestionIndex(questionIndex);
       setRoomState("playing");
@@ -82,7 +82,7 @@ export function QuizApp() {
       if (timerRef.current) clearInterval(timerRef.current);
     });
 
-    newSocket.on("quiz_ended", (finalPlayers: Player[]) => {
+    newSocket.on("room_error", (message: string) => {\n      alert(message);\n      setRoomState("menu");\n    });\n\n    newSocket.on("connect", () => {\n      if (roomIdRef.current) newSocket.emit("sync_room", { roomId: roomIdRef.current, clientId: clientIdRef.current });\n    });\n\n    newSocket.on("quiz_ended", (finalPlayers: Player[]) => {
       setPlayers(finalPlayers);
       setRoomState("ended");
       if (timerRef.current) clearInterval(timerRef.current);
@@ -105,7 +105,7 @@ export function QuizApp() {
 
   const handleJoinRoom = () => {
     if (!username.trim() || !roomId.trim() || !socket) return;
-    socket.emit("join_room", { roomId: roomId.toUpperCase(), username });
+    roomIdRef.current = roomId.toUpperCase();\n    socket.emit("join_room", { roomId: roomId.toUpperCase(), username, clientId: clientIdRef.current });
     setRoomState("waiting");
   };
 
