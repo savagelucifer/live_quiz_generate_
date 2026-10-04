@@ -40,8 +40,8 @@ export function QuizApp() {
   const roomIdRef = useRef<string>("");
 
   useEffect(() => {
-    // Connect to Socket.IO server
-    const newSocket = io();
+    // Use Socket.IO locally and the Vercel WebSocket client in production.
+    const newSocket = createRealtimeClient();
     setSocket(newSocket);
 
     newSocket.on("player_joined", (updatedPlayers: Player[]) => {
