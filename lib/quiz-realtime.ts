@@ -11,9 +11,23 @@ type Room = {
 
 const ROOM_PREFIX = "livequiz:room:";
 const STREAM = "livequiz:events";
-const redis = process.env.REDIS_URL
-  ? new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: null, retryStrategy: n => Math.min(n * 200, 5000) })
-  : null;
+const redisOptions = {
+  maxRetriesPerRequest: null,
+  retryStrategy: (n: number) => Math.min(n * 200, 5000),
+};
+
+const redis =
+  process.env.REDIS_HOST && process.env.REDIS_PASSWORD
+    ? new Redis({
+        ...redisOptions,
+        host: process.env.REDIS_HOST,
+        port: Number(process.env.REDIS_PORT) || 6379,
+        username: process.env.REDIS_USERNAME || "default",
+        password: process.env.REDIS_PASSWORD,
+      })
+    : process.env.REDIS_URL
+      ? new Redis(process.env.REDIS_URL, redisOptions)
+      : null;
 const conns = new Map<VercelWebSocket, { clientId: string; roomId: string }>();
 const instanceId = crypto.randomUUID();
 let reader: Redis | null = null;
