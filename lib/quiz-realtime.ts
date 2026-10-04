@@ -1,5 +1,6 @@
 import Redis from "ioredis";
 
+type VercelWebSocket = any;
 type Player = { id: string; username: string; score: number };
 type Question = { question_text: string; options: string[]; correct_answer: string; explanation: string };
 type Room = {
@@ -13,14 +14,14 @@ const STREAM = "livequiz:events";
 const redis = process.env.REDIS_URL
   ? new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: null, retryStrategy: n => Math.min(n * 200, 5000) })
   : null;
-const conns = new Map<WebSocket, { clientId: string; roomId: string }>();
+const conns = new Map<VercelWebSocket, { clientId: string; roomId: string }>();
 const instanceId = crypto.randomUUID();
 let reader: Redis | null = null;
 let reading = false;
 let lastId = "0-0";
 
 const roomKey = (id: string) => `${ROOM_PREFIX}${id}`;
-const send = (ws: WebSocket, event: string, data: unknown) => {
+const send = (ws: VercelWebSocket, event: string, data: unknown) => {
   if (ws.readyState === 1) ws.send(JSON.stringify({ event, data }));
 };
 const broadcast = (roomId: string, event: string, data: unknown) => {
@@ -61,21 +62,21 @@ async function saveRoom(id: string, room: Room) {
 }
 const publicQuestion = (q: Question) => ({ question_text:q.question_text, options:q.options });
 
-async function createRoom(ws: WebSocket, roomId: string, clientId: string, hostName: string) {
+async function createRoom(ws: VercelWebSocket, roomId: string, clientId: string, hostName: string) {
   if (!redis) return send(ws,"room_error","Redis is not configured on the server.");
   const id=roomId.trim().toUpperCase();
   if (await getRoom(id)) return send(ws,"room_error","That room already exists.");
   const room:Room={hostClientId:clientId,players:[{id:clientId,username:hostName.trim().slice(0,40),score:0}],status:"lobby",questions:[],currentQuestionIndex:0,answersThisRound:0,answeredPlayerIds:[],timeLimit:15,questionStartedAt:0};
   await saveRoom(id,room); conns.set(ws,{clientId,roomId:id}); await publish(id,"player_joined",room.players);
 }
-async function joinRoom(ws: WebSocket, roomId:string, clientId:string, username:string) {
+async function joinRoom(ws: VercelWebSocket, roomId:string, clientId:string, username:string) {
   const id=roomId.trim().toUpperCase(); const room=await getRoom(id);
   if(!room) return send(ws,"room_error","Room not found.");
   if(room.status!=="lobby") return send(ws,"room_error","This quiz has already started.");
   if(!room.players.some(p=>p.id===clientId)){room.players.push({id:clientId,username:username.trim().slice(0,40),score:0});await saveRoom(id,room);}
   conns.set(ws,{clientId,roomId:id}); await publish(id,"player_joined",room.players);
 }
-async function syncRoom(ws:WebSocket,roomId:string,clientId:string){
+async function syncRoom(ws:VercelWebSocket,roomId:string,clientId:string){
   const id=roomId.trim().toUpperCase(); const room=await getRoom(id);
   if(!room) return send(ws,"room_error","Room not found.");
   conns.set(ws,{clientId,roomId:id}); send(ws,"player_joined",room.players);
@@ -84,7 +85,7 @@ async function syncRoom(ws:WebSocket,roomId:string,clientId:string){
   const q=room.questions[room.currentQuestionIndex]; if(!q)return;
   send(ws,"quiz_started",null); send(ws,"receive_question",{questionIndex:room.currentQuestionIndex,question:publicQuestion(q),timeLimit:room.timeLimit,startedAt:room.questionStartedAt});
 }
-async function startQuiz(ws:WebSocket,roomId:string,questions:Question[],timeLimit:number){
+async function startQuiz(ws:VercelWebSocket,roomId:string,questions:Question[],timeLimit:number){
   const id=roomId.trim().toUpperCase(); const c=conns.get(ws); const room=await getRoom(id);
   if(!room||!c||room.hostClientId!==c.clientId)return;
   room.status="playing";room.questions=questions;room.timeLimit=Math.max(5,Math.min(120,Number(timeLimit)||15));room.currentQuestionIndex=0;room.answersThisRound=0;room.answeredPlayerIds=[];
@@ -97,7 +98,7 @@ async function sendQuestion(id:string,index:number){
   const q=room.questions[index];await publish(id,"receive_question",{questionIndex:index,question:publicQuestion(q),timeLimit:room.timeLimit,startedAt:room.questionStartedAt});
   setTimeout(async()=>{const latest=await getRoom(id);if(!latest||latest.status!=="playing"||latest.currentQuestionIndex!==index||latest.answersThisRound>=latest.players.length)return;await publish(id,"round_results",{correct_answer:q.correct_answer,explanation:q.explanation,players:latest.players});setTimeout(()=>void sendQuestion(id,index+1),5000);},(room.timeLimit+1)*1000);
 }
-async function submitAnswer(ws:WebSocket,roomId:string,answer:string,timeTaken:number){
+async function submitAnswer(ws:VercelWebSocket,roomId:string,answer:string,timeTaken:number){
   const id=roomId.trim().toUpperCase();const c=conns.get(ws);const room=await getRoom(id);
   if(!room||!c||room.status!=="playing"||room.answeredPlayerIds.includes(c.clientId))return;
   const q=room.questions[room.currentQuestionIndex];const p=room.players.find(x=>x.id===c.clientId);if(!q||!p)return;
@@ -105,9 +106,9 @@ async function submitAnswer(ws:WebSocket,roomId:string,answer:string,timeTaken:n
   room.answeredPlayerIds.push(c.clientId);room.answersThisRound=room.answeredPlayerIds.length;await saveRoom(id,room);
   if(room.answersThisRound>=room.players.length){await publish(id,"round_results",{correct_answer:q.correct_answer,explanation:q.explanation,players:room.players});setTimeout(()=>void sendQuestion(id,room.currentQuestionIndex+1),5000);}
 }
-export function register(ws:WebSocket){conns.set(ws,{clientId:"",roomId:""});void startReader();}
-export async function unregister(ws:WebSocket){conns.delete(ws);if(conns.size===0){reading=false;if(reader){void reader.quit().catch(()=>{});reader=null;}}}
-export async function handleMessage(ws:WebSocket,raw:string){
+export function register(ws:VercelWebSocket){conns.set(ws,{clientId:"",roomId:""});void startReader();}
+export async function unregister(ws:VercelWebSocket){conns.delete(ws);if(conns.size===0){reading=false;if(reader){void reader.quit().catch(()=>{});reader=null;}}}
+export async function handleMessage(ws:VercelWebSocket,raw:string){
   let m:any;try{m=JSON.parse(raw);}catch{return;}
   switch(m.type){case "create_room":return createRoom(ws,m.roomId,m.clientId,m.hostName);case "join_room":return joinRoom(ws,m.roomId,m.clientId,m.username);case "sync_room":return syncRoom(ws,m.roomId,m.clientId);case "quiz_started":return startQuiz(ws,m.roomId,m.questions,m.timeLimit);case "submit_answer":return submitAnswer(ws,m.roomId,m.answer,m.timeTaken);}
 }
