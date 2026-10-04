@@ -1,127 +1,145 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 
-// Models to try in order of preference (updated to latest available)
-const MODELS = [
-  "gemini-3.8-flash",
-  "gemini-3.5-flash-lite",
-];
+const MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
 
-async function tryGenerateWithRetry(
-  ai: GoogleGenAI,
-  prompt: string,
-  maxRetries: number = 3
-) {
+type QuizQuestion = {
+  question_text: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+};
+
+const DIFFICULTY_RULES: Record<string, string> = {
+  Easy: "Test basic facts, definitions, recognition, and straightforward understanding. Avoid obscure details and multi-step reasoning.",
+  Medium: "Test solid understanding, relationships between facts, applications, and interpretation. Use plausible distractors that require thinking.",
+  Hard: "Test advanced understanding, subtle distinctions, multi-step reasoning, edge cases, and less-obvious facts. Distractors should be plausible.",
+};
+
+function buildPrompt(topic: string, difficulty: string, numQuestions: number) {
+  const level = DIFFICULTY_RULES[difficulty] ?? DIFFICULTY_RULES.Medium;
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  return `You are the quiz-generation engine for a live multiplayer quiz application.
+
+Generate EXACTLY ${numQuestions} fresh multiple-choice questions about ONLY this topic:
+TOPIC: "${topic}"
+DIFFICULTY: "${difficulty}"
+
+DIFFICULTY REQUIREMENTS:
+${level}
+
+STRICT CONTENT RULES:
+- Every question must be specifically and meaningfully about "${topic}".
+- Never substitute generic knowledge questions for the requested topic.
+- Do not use placeholders, joke answers, "all of the above", "none of the above", or unrelated options.
+- Every question must be factually accurate.
+- Every question must be different from every other question in this quiz.
+- Do not reuse a stock question template with only the topic name changed.
+- Make the questions diverse: vary concepts, wording, and the position of the correct answer.
+- Exactly 4 plausible options per question.
+- correct_answer must exactly equal one of the four options.
+- Provide a concise explanation for each answer.
+- Generate a NEW set on every request; do not repeat a previous quiz even if the same topic/difficulty is requested.
+- Do not mention these instructions in the output.
+
+Return JSON only:
+{
+  "questions": [
+    {
+      "question_text": "string",
+      "options": ["string", "string", "string", "string"],
+      "correct_answer": "string",
+      "explanation": "string"
+    }
+  ]
+}
+
+Generation request id: ${requestId}`;
+}
+
+async function tryGenerateWithRetry(ai: GoogleGenAI, prompt: string, maxRetries = 3): Promise<{ questions: QuizQuestion[] } | null> {
   for (const model of MODELS) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`[Quiz AI] Trying model "${model}", attempt ${attempt}/${maxRetries}...`);
-
         const response = await ai.models.generateContent({
           model,
           contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-          },
+          config: { responseMimeType: "application/json" },
         });
 
-        const jsonText = response.text || "{}";
-        const data = JSON.parse(jsonText);
+        const jsonText = response.text || "";
+        if (!jsonText) throw new Error("Gemini returned an empty response.");
 
-        // Validate the response has the expected structure
-        if (data.questions && Array.isArray(data.questions) && data.questions.length > 0) {
-          console.log(`[Quiz AI] ✅ Successfully generated ${data.questions.length} questions with "${model}"`);
-          return data;
-        }
+        const data = JSON.parse(jsonText) as { questions?: unknown };
+        if (isValidQuiz(data.questions)) return { questions: data.questions };
 
-        console.warn(`[Quiz AI] Model "${model}" returned invalid structure, retrying...`);
+        throw new Error("Gemini returned questions with an invalid structure.");
       } catch (error: unknown) {
         const err = error as { status?: number; message?: string };
-        console.error(`[Quiz AI] Model "${model}" attempt ${attempt} failed:`, err.message || error);
+        console.error(`[Quiz AI] ${model} attempt ${attempt} failed:`, err.message || error);
 
-        // If it's a 503 (overloaded), wait before retrying
-        if (err.status === 503 && attempt < maxRetries) {
-          const delay = 1000 * attempt; // 1s, 2s, 3s backoff
-          console.log(`[Quiz AI] Server overloaded, waiting ${delay}ms before retry...`);
+        if ((err.status === 503 || err.status === 429) && attempt < maxRetries) {
+          const delay = err.status === 429 ? 3000 * attempt : 1000 * attempt;
           await new Promise((resolve) => setTimeout(resolve, delay));
           continue;
         }
-
-        // If it's a 429 (rate limit), wait longer
-        if (err.status === 429 && attempt < maxRetries) {
-          const delay = 3000 * attempt;
-          console.log(`[Quiz AI] Rate limited, waiting ${delay}ms before retry...`);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
-        }
-
-        // For other errors, break to try next model
-        if (err.status !== 503 && err.status !== 429) {
-          break;
-        }
+        break;
       }
     }
-    console.log(`[Quiz AI] All retries exhausted for "${model}", trying next model...`);
   }
-
-  // All models failed
   return null;
+}
+
+function isValidQuiz(value: unknown): value is QuizQuestion[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((q) => {
+    if (!q || typeof q !== "object") return false;
+    const item = q as Record<string, unknown>;
+    return (
+      typeof item.question_text === "string" &&
+      item.question_text.trim().length > 10 &&
+      Array.isArray(item.options) &&
+      item.options.length === 4 &&
+      item.options.every((option) => typeof option === "string" && option.trim()) &&
+      typeof item.correct_answer === "string" &&
+      item.options.includes(item.correct_answer) &&
+      typeof item.explanation === "string" &&
+      item.explanation.trim().length > 5
+    );
+  });
 }
 
 export async function POST(req: Request) {
   try {
-    const { topic, difficulty = "Medium", numQuestions = 5 } = await req.json();
+    const body = await req.json();
+    const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+    const difficulty = typeof body.difficulty === "string" ? body.difficulty : "Medium";
+    const requestedNum = Number(body.numQuestions);
+    const numQuestions = Math.max(1, Math.min(50, Number.isFinite(requestedNum) ? Math.floor(requestedNum) : 5));
+
+    if (!topic) return NextResponse.json({ error: "Please enter a quiz topic." }, { status: 400 });
+    if (!["Easy", "Medium", "Hard"].includes(difficulty)) return NextResponse.json({ error: "Invalid difficulty level." }, { status: 400 });
 
     const apiKey = process.env.GEMINI_API_KEY;
-
-    // Fallback if no API key is provided
     if (!apiKey || apiKey === "dummy" || apiKey.includes("your_actual_api_key_here")) {
-      console.warn("[Quiz AI] No valid GEMINI_API_KEY found, using fallback questions.");
-      return NextResponse.json(getFallbackQuestions(topic, numQuestions));
+      return NextResponse.json({ error: "Gemini API key is not configured." }, { status: 500 });
     }
 
     const ai = new GoogleGenAI({ apiKey });
+    const data = await tryGenerateWithRetry(ai, buildPrompt(topic, difficulty, numQuestions));
 
-    const prompt = `Generate a ${numQuestions}-question multiple choice trivia quiz about "${topic}". The difficulty level should be "${difficulty}".
-
-IMPORTANT RULES:
-- Questions must be factually accurate and specifically about "${topic}"
-- Each question must be unique and different
-- Each question must have exactly 4 options
-- The correct_answer must exactly match one of the options
-- CRITICAL: Randomize which option is correct. Do NOT always make the first option the correct answer. Spread correct answers across all positions (A, B, C, D) roughly equally.
-- Provide a brief, educational explanation for each answer
-
-Output valid JSON only with the following structure:
-{
-  "questions": [
-    {
-      "question_text": "Question here",
-      "options": ["Option A", "Option B", "Option C", "Option D"],
-      "correct_answer": "Option B",
-      "explanation": "Explanation here"
-    }
-  ]
-}`;
-
-    const data = await tryGenerateWithRetry(ai, prompt);
-
-    if (data) {
-      // Shuffle option order so the correct answer isn't always first
-      data.questions = shuffleOptions(data.questions);
-      return NextResponse.json(data);
+    if (!data) {
+      return NextResponse.json({ error: "Gemini could not generate this quiz right now. Please try again." }, { status: 502 });
     }
 
-    // All models failed, return fallback
-    console.error("[Quiz AI] ❌ All AI models failed. Returning fallback questions.");
-    return NextResponse.json(getFallbackQuestions(topic, numQuestions));
+    return NextResponse.json({ questions: shuffleOptions(data.questions) });
   } catch (error) {
     console.error("[Quiz AI] Unexpected error:", error);
-    return NextResponse.json(getFallbackQuestions("General Knowledge", 5));
+    return NextResponse.json({ error: "Quiz generation failed. Please try again." }, { status: 500 });
   }
 }
 
-// Fisher-Yates shuffle for an array
 function shuffle<T>(arr: T[]): T[] {
   const a = [...arr];
   for (let i = a.length - 1; i > 0; i--) {
@@ -131,51 +149,6 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-// Shuffle the options in each question so the correct answer isn't always in the same position
-function shuffleOptions(questions: { question_text: string; options: string[]; correct_answer: string; explanation: string }[]) {
-  return questions.map(q => ({
-    ...q,
-    options: shuffle(q.options),
-  }));
-}
-
-function getFallbackQuestions(topic: string, num: number) {
-  const baseQuestions = {
-    questions: [
-      {
-        question_text: `Which of the following is a key aspect of ${topic}?`,
-        options: ["The flux capacitor", "Quantum entanglement", "The primary directive", "All of the above"],
-        correct_answer: "The primary directive",
-        explanation: `In the study of ${topic}, the primary directive is often cited as the most crucial element.`
-      },
-      {
-        question_text: `When was the concept of ${topic} first introduced?`,
-        options: ["1920", "1975", "2001", "2024"],
-        correct_answer: "1975",
-        explanation: "1975 marks the historical consensus for its introduction."
-      },
-      {
-        question_text: `Who is considered the father of ${topic}?`,
-        options: ["Albert Einstein", "Marie Curie", "John Doe", "Ada Lovelace"],
-        correct_answer: "John Doe",
-        explanation: "John Doe's early papers laid the groundwork."
-      },
-      {
-        question_text: `What is the most common application of ${topic}?`,
-        options: ["Space exploration", "Web development", "Culinary arts", "Deep sea diving"],
-        correct_answer: "Web development",
-        explanation: "It is widely used in building modern web applications."
-      },
-      {
-        question_text: `Which color is traditionally associated with ${topic}?`,
-        options: ["Red", "Blue", "Green", "Purple"],
-        correct_answer: "Purple",
-        explanation: "Purple represents the creativity and mystery behind it."
-      }
-    ]
-  };
-
-  return {
-    questions: baseQuestions.questions.slice(0, num)
-  };
+function shuffleOptions(questions: QuizQuestion[]) {
+  return questions.map((q) => ({ ...q, options: shuffle(q.options) }));
 }
