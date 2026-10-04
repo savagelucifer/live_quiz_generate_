@@ -1,4 +1,3 @@
-import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
 
 const MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"];
@@ -58,36 +57,74 @@ Return JSON only:
 Generation request id: ${requestId}`;
 }
 
-async function tryGenerateWithRetry(ai: GoogleGenAI, prompt: string, maxRetries = 3): Promise<{ questions: QuizQuestion[] } | null> {
+async function tryGenerateWithRetry(apiKey: string, prompt: string, maxRetries = 3): Promise<{ questions: QuizQuestion[] } | null> {
+  let lastError = "Unknown Gemini error.";
+
   for (const model of MODELS) {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const response = await ai.models.generateContent({
-          model,
-          contents: prompt,
-          config: { responseMimeType: "application/json" },
-        });
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": apiKey,
+            },
+            body: JSON.stringify({
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+              generationConfig: { responseMimeType: "application/json" },
+            }),
+          }
+        );
 
-        const jsonText = response.text || "";
-        if (!jsonText) throw new Error("Gemini returned an empty response.");
+        const payload = (await response.json()) as {
+          error?: { message?: string; status?: string };
+          candidates?: Array<{
+            content?: { parts?: Array<{ text?: string }> };
+          }>;
+        };
 
-        const data = JSON.parse(jsonText) as { questions?: unknown };
+        if (!response.ok) {
+          lastError = payload.error?.message || `Gemini HTTP ${response.status}`;
+          console.error(`[Quiz AI] ${model} failed (${response.status}): ${lastError}`);
+
+          if ((response.status === 429 || response.status === 503) && attempt < maxRetries) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, (response.status === 429 ? 3000 : 1000) * attempt)
+            );
+            continue;
+          }
+          break;
+        }
+
+        const text = payload.candidates?.[0]?.content?.parts
+          ?.map((part) => part.text || "")
+          .join("")
+          .trim();
+
+        if (!text) {
+          lastError = "Gemini returned no text.";
+          break;
+        }
+
+        const data = JSON.parse(text) as { questions?: unknown };
         if (isValidQuiz(data.questions)) return { questions: data.questions };
 
-        throw new Error("Gemini returned questions with an invalid structure.");
-      } catch (error: unknown) {
-        const err = error as { status?: number; message?: string };
-        console.error(`[Quiz AI] ${model} attempt ${attempt} failed:`, err.message || error);
-
-        if ((err.status === 503 || err.status === 429) && attempt < maxRetries) {
-          const delay = err.status === 429 ? 3000 * attempt : 1000 * attempt;
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          continue;
-        }
+        lastError = "Gemini returned an invalid quiz structure.";
+        console.error(`[Quiz AI] ${model} returned invalid quiz JSON.`);
         break;
+      } catch (error: unknown) {
+        lastError = error instanceof Error ? error.message : "Unknown Gemini error.";
+        console.error(`[Quiz AI] ${model} attempt ${attempt} failed:`, lastError);
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        }
       }
     }
   }
+
+  console.error("[Quiz AI] All models failed:", lastError);
   return null;
 }
 
@@ -126,8 +163,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Gemini API key is not configured." }, { status: 500 });
     }
 
-    const ai = new GoogleGenAI({ apiKey });
-    const data = await tryGenerateWithRetry(ai, buildPrompt(topic, difficulty, numQuestions));
+    const data = await tryGenerateWithRetry(apiKey, buildPrompt(topic, difficulty, numQuestions));
 
     if (!data) {
       return NextResponse.json({ error: "Gemini could not generate this quiz right now. Please try again." }, { status: 502 });
