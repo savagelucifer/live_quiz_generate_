@@ -125,7 +125,7 @@ async function tryGenerateWithRetry(apiKey: string, prompt: string, maxRetries =
   }
 
   console.error("[Quiz AI] All models failed:", lastError);
-  return null;
+  throw new Error(`Gemini generation failed: ${lastError}`);
 }
 
 function isValidQuiz(value: unknown): value is QuizQuestion[] {
@@ -164,15 +164,11 @@ export async function POST(req: Request) {
     }
 
     const data = await tryGenerateWithRetry(apiKey, buildPrompt(topic, difficulty, numQuestions));
-
-    if (!data) {
-      return NextResponse.json({ error: "Gemini could not generate this quiz right now. Please try again." }, { status: 502 });
-    }
-
     return NextResponse.json({ questions: shuffleOptions(data.questions) });
   } catch (error) {
     console.error("[Quiz AI] Unexpected error:", error);
-    return NextResponse.json({ error: "Quiz generation failed. Please try again." }, { status: 500 });
+    const message = error instanceof Error ? error.message : "Quiz generation failed. Please try again.";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }
 
