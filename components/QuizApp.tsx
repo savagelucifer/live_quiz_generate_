@@ -33,6 +33,7 @@ export function QuizApp() {
   const [timeLimit, setTimeLimit] = useState(15);
   const [timeRemaining, setTimeRemaining] = useState(15);
   const [roomTimeLimit, setRoomTimeLimit] = useState(15);
+  const [timedOut, setTimedOut] = useState(false);
   
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -40,11 +41,18 @@ export function QuizApp() {
   const roomIdRef = useRef<string>("");
 
   useEffect(() => {
+    if (!clientIdRef.current) {
+      clientIdRef.current = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
     // Use Socket.IO locally and the Vercel WebSocket client in production.
     const newSocket = createRealtimeClient();
     setSocket(newSocket);
 
     newSocket.on("player_joined", (updatedPlayers: Player[]) => {
+      setPlayers(updatedPlayers);
+    });
+
+    newSocket.on("player_scores", (updatedPlayers: Player[]) => {
       setPlayers(updatedPlayers);
     });
 
@@ -59,6 +67,7 @@ export function QuizApp() {
       setRoomState("playing");
       setSelectedAnswer(null);
       setRoundResult(null);
+      setTimedOut(false);
       
       const limit = serverTimeLimit || 15;
       setRoomTimeLimit(limit);
@@ -80,8 +89,9 @@ export function QuizApp() {
       }, 1000);
     });
 
-    newSocket.on("round_results", (result: RoundResult) => {
+    newSocket.on("round_results", (result: RoundResult & { timedOut?: boolean }) => {
       setRoundResult(result);
+      setTimedOut(Boolean(result.timedOut));
       setRoomState("round_results");
       setPlayers(result.players);
       if (timerRef.current) clearInterval(timerRef.current);
@@ -154,6 +164,11 @@ export function QuizApp() {
     } finally {
       setIsGenerating(false);
     }
+  };
+
+  const handleNextQuestion = () => {
+    if (!socket || roomState !== "round_results") return;
+    socket.emit("next_question", { roomId });
   };
 
   const handleAnswerSubmit = (answer: string) => {
@@ -427,17 +442,32 @@ export function QuizApp() {
                   </div>
                   
                   {roomState === "round_results" && roundResult && (
-                    <motion.div 
+                    <motion.div
                       initial={{ opacity: 0, height: 0 }}
                       animate={{ opacity: 1, height: "auto" }}
-                      className="mt-8 p-4 bg-purple-900/20 border border-purple-500/30 rounded-xl"
+                      className="mt-8 space-y-4"
                     >
-                      <h4 className="text-purple-300 font-medium flex items-center gap-2 mb-2">
-                        <Sparkles className="w-4 h-4" /> AI Explanation
-                      </h4>
-                      <p className="text-slate-300 text-sm md:text-base leading-relaxed">
-                        {roundResult.explanation}
-                      </p>
+                      <div className="p-4 bg-purple-900/20 border border-purple-500/30 rounded-xl">
+                        <h4 className="text-purple-300 font-medium flex items-center gap-2 mb-2">
+                          <Sparkles className="w-4 h-4" /> AI Explanation
+                        </h4>
+                        <p className="text-slate-300 text-sm md:text-base leading-relaxed">
+                          {roundResult.explanation}
+                        </p>
+                      </div>
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+                        <p className="text-sm text-slate-400">
+                          {timedOut
+                            ? "Time's up. Read the explanation, then continue when you're ready."
+                            : "Take your time to read the explanation. Continue when you're ready."}
+                        </p>
+                        <Button
+                          onClick={handleNextQuestion}
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white min-w-32"
+                        >
+                          {questionIndex + 1 >= numQuestions ? "Finish Quiz" : "Next Question"}
+                        </Button>
+                      </div>
                     </motion.div>
                   )}
                 </CardContent>
