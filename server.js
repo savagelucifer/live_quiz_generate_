@@ -9,134 +9,163 @@ const port = process.env.PORT || 3000;
 
 const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();
-
-// In-memory data store for rooms
 const rooms = new Map();
-// rooms.get(roomId) = { host: socket.id, players: [{id, username, score}], status: 'lobby'|'playing'|'ended', questions: [], currentQuestionIndex: 0 }
 
 app.prepare().then(() => {
   const httpServer = createServer(handler);
   const io = new Server(httpServer);
 
+  const emitPlayerList = (roomId) => {
+    const room = rooms.get(roomId);
+    if (room) io.to(roomId).emit("player_joined", room.players);
+  };
+
+  const sendQuestion = (roomId, socketId) => {
+    const room = rooms.get(roomId);
+    if (!room || room.status !== "playing") return;
+    const progress = room.progress[socketId];
+    if (!progress || progress.finished) return;
+
+    if (progress.questionIndex >= room.questions.length) {
+      progress.finished = true;
+      io.to(socketId).emit("quiz_ended", room.players);
+      if (room.players.every((p) => room.progress[p.id]?.finished)) {
+        room.status = "ended";
+        io.to(roomId).emit("quiz_ended", room.players);
+      }
+      return;
+    }
+
+    progress.answered = false;
+    progress.questionStartedAt = Date.now();
+    const q = room.questions[progress.questionIndex];
+
+    io.to(socketId).emit("receive_question", {
+      questionIndex: progress.questionIndex,
+      question: { question_text: q.question_text, options: q.options },
+      timeLimit: room.timeLimit,
+      startedAt: progress.questionStartedAt,
+    });
+
+    setTimeout(() => {
+      const latest = rooms.get(roomId);
+      const current = latest?.progress[socketId];
+      if (!latest || latest.status !== "playing" || !current || current.finished || current.answered || current.questionIndex !== progress.questionIndex) return;
+
+      current.answered = true;
+      io.to(socketId).emit("round_results", {
+        correct_answer: q.correct_answer,
+        explanation: q.explanation,
+        players: latest.players,
+        timedOut: true,
+      });
+      io.to(roomId).emit("player_scores", latest.players);
+    }, (room.timeLimit + 1) * 1000);
+  };
+
   io.on("connection", (socket) => {
     console.log("Player connected:", socket.id);
 
-    // 1. Host creates a room
     socket.on("create_room", ({ roomId, hostName }) => {
+      if (rooms.has(roomId)) return socket.emit("room_error", "That room already exists.");
       socket.join(roomId);
       rooms.set(roomId, {
         host: socket.id,
         players: [{ id: socket.id, username: hostName, score: 0 }],
         status: "lobby",
         questions: [],
-        currentQuestionIndex: 0,
-        answersThisRound: 0,
+        timeLimit: 15,
+        progress: {},
       });
-      io.to(roomId).emit("player_joined", rooms.get(roomId).players);
+      emitPlayerList(roomId);
     });
 
-    // 2. Player joins a room
     socket.on("join_room", ({ roomId, username }) => {
       socket.join(roomId);
       const room = rooms.get(roomId);
-      if (room) {
-        room.players.push({ id: socket.id, username, score: 0 });
-        io.to(roomId).emit("player_joined", room.players);
-      }
+      if (!room) return socket.emit("room_error", "Room not found.");
+      if (room.status !== "lobby") return socket.emit("room_error", "This quiz has already started.");
+      room.players.push({ id: socket.id, username, score: 0 });
+      emitPlayerList(roomId);
     });
 
-    // 3. Quiz started by host
     socket.on("quiz_started", ({ roomId, questions, timeLimit }) => {
       const room = rooms.get(roomId);
-      if (room && room.host === socket.id) {
-        room.status = "playing";
-        room.questions = questions; // Store AI generated questions
-        room.timeLimit = timeLimit || 15;
-        room.currentQuestionIndex = 0;
-        
-        io.to(roomId).emit("quiz_started");
-        
-        // Push first question after a short delay
-        setTimeout(() => sendQuestion(roomId, 0), 2000);
-      }
+      if (!room || room.host !== socket.id) return;
+
+      room.status = "playing";
+      room.questions = questions;
+      room.timeLimit = timeLimit || 15;
+      room.progress = Object.fromEntries(
+        room.players.map((p) => [p.id, { questionIndex: 0, answered: false, finished: false, questionStartedAt: 0 }])
+      );
+
+      io.to(roomId).emit("quiz_started");
+      setTimeout(() => {
+        const latest = rooms.get(roomId);
+        if (!latest || latest.status !== "playing") return;
+        latest.players.forEach((p) => sendQuestion(roomId, p.id));
+      }, 1500);
     });
 
-    const sendQuestion = (roomId, index) => {
-      const room = rooms.get(roomId);
-      if (!room) return;
-
-      if (index < room.questions.length) {
-        room.currentQuestionIndex = index;
-        room.answersThisRound = 0;
-        const q = room.questions[index];
-        
-        // Exclude the correct answer when sending to clients
-        const clientQuestion = {
-          question_text: q.question_text,
-          options: q.options,
-        };
-        
-        io.to(roomId).emit("receive_question", { questionIndex: index, question: clientQuestion, timeLimit: room.timeLimit });
-      } else {
-        // No more questions, trigger podium
-        room.status = "ended";
-        io.to(roomId).emit("quiz_ended", room.players);
-      }
-    };
-
-    // 4. Player submits an answer
     socket.on("submit_answer", ({ roomId, answer, timeTaken }) => {
       const room = rooms.get(roomId);
-      if (room) {
-        const q = room.questions[room.currentQuestionIndex];
-        const isCorrect = q.correct_answer === answer;
-        
-        // Calculate points based on time (e.g. max 1000 points, timeLimit seconds max)
-        const timeLimit = room.timeLimit || 15;
-        let points = 0;
-        if (isCorrect) {
-          const timeRatio = Math.max(0, (timeLimit - timeTaken) / timeLimit);
-          points = Math.round(500 + (500 * timeRatio));
-        }
+      if (!room || room.status !== "playing") return;
 
-        // Update player score
-        const player = room.players.find(p => p.id === socket.id);
-        if (player) {
-          player.score += points;
-        }
+      const progress = room.progress[socket.id];
+      if (!progress || progress.finished || progress.answered) return;
 
-        room.answersThisRound += 1;
+      const q = room.questions[progress.questionIndex];
+      const player = room.players.find((p) => p.id === socket.id);
+      if (!q || !player) return;
 
-        // If everyone answered, emit round results immediately
-        if (room.answersThisRound >= room.players.length) {
-          io.to(roomId).emit("round_results", {
-            correct_answer: q.correct_answer,
-            explanation: q.explanation,
-            players: room.players
-          });
+      const elapsed = (Date.now() - progress.questionStartedAt) / 1000;
+      if (elapsed > room.timeLimit + 0.5) return;
 
-          // Send next question after a 5 second pause to review results
-          setTimeout(() => sendQuestion(roomId, room.currentQuestionIndex + 1), 5000);
-        }
+      const measuredTime = Math.max(0, Math.min(room.timeLimit, Number(timeTaken) || elapsed));
+      if (q.correct_answer === answer) {
+        player.score += Math.round(500 + 500 * Math.max(0, (room.timeLimit - measuredTime) / room.timeLimit));
       }
+
+      progress.answered = true;
+      io.to(roomId).emit("player_scores", room.players);
+      io.to(socket.id).emit("round_results", {
+        correct_answer: q.correct_answer,
+        explanation: q.explanation,
+        players: room.players,
+        timedOut: false,
+      });
+    });
+
+    socket.on("next_question", ({ roomId }) => {
+      const room = rooms.get(roomId);
+      if (!room || room.status !== "playing") return;
+
+      const progress = room.progress[socket.id];
+      if (!progress || !progress.answered || progress.finished) return;
+
+      progress.questionIndex += 1;
+      sendQuestion(roomId, socket.id);
     });
 
     socket.on("disconnect", () => {
-      console.log("Player disconnected:", socket.id);
-      // Clean up rooms on disconnect for robust production apps
       for (const [roomId, room] of rooms.entries()) {
-        room.players = room.players.filter(p => p.id !== socket.id);
-        io.to(roomId).emit("player_joined", room.players);
+        room.players = room.players.filter((p) => p.id !== socket.id);
+        delete room.progress[socket.id];
+
+        if (room.players.length === 0) {
+          rooms.delete(roomId);
+        } else {
+          emitPlayerList(roomId);
+        }
       }
     });
   });
 
-  httpServer
-    .once("error", (err) => {
-      console.error(err);
-      process.exit(1);
-    })
-    .listen(port, () => {
-      console.log(`> Ready on http://${hostname}:${port}`);
-    });
+  httpServer.once("error", (err) => {
+    console.error(err);
+    process.exit(1);
+  }).listen(port, () => {
+    console.log(`> Ready on http://${hostname}:${port}`);
+  });
 });
