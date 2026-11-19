@@ -93,7 +93,10 @@ async function joinRoom(ws: VercelWebSocket, roomId: string, clientId: string, u
 async function sendQuestionToPlayer(roomId: string, clientId: string) {
   const room = await getRoom(roomId); if (!room || room.status !== "playing") return;
   const progress = room.progress[clientId];
-  if (!progress || progress.finished) return send(wsForClient(roomId, clientId), "quiz_ended", room.players);
+  if (!progress || progress.finished) {
+    await publish(roomId, "quiz_ended", room.players, clientId);
+    return;
+  }
   if (progress.questionIndex >= room.questions.length) {
     progress.finished = true; await saveRoom(roomId, room); await publish(roomId, "quiz_ended", room.players, clientId); return;
   }
@@ -101,11 +104,6 @@ async function sendQuestionToPlayer(roomId: string, clientId: string) {
   const q = room.questions[progress.questionIndex];
   await publish(roomId, "receive_question", { questionIndex: progress.questionIndex, question: publicQuestion(q), timeLimit: room.timeLimit, startedAt: progress.questionStartedAt }, clientId);
   setTimeout(() => void handleTimeout(roomId, clientId, progress.questionIndex), (room.timeLimit + 1) * 1000);
-}
-
-function wsForClient(roomId: string, clientId: string): VercelWebSocket {
-  for (const [ws, c] of conns) if (c.roomId === roomId && c.clientId === clientId) return ws;
-  return { readyState: 0 };
 }
 
 async function handleTimeout(roomId: string, clientId: string, questionIndex: number) {
@@ -137,7 +135,11 @@ async function startQuiz(ws: VercelWebSocket, roomId: string, questions: Questio
 
 async function startQuestionsForConnectedPlayers(roomId: string) {
   const room = await getRoom(roomId); if (!room || room.status !== "playing") return;
-  for (const [, c] of conns) if (c.roomId === roomId) void sendQuestionToPlayer(roomId, c.clientId);
+  // Each player's WebSocket may be attached to a different Vercel function instance.
+  // Publish a targeted question for every room member; Redis fans it out to that player's instance.
+  for (const player of room.players) {
+    void sendQuestionToPlayer(roomId, player.id);
+  }
 }
 
 async function submitAnswer(ws: VercelWebSocket, roomId: string, answer: string, timeTaken: number) {
