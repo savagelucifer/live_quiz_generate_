@@ -124,6 +124,8 @@ export function QuizApp() {
     setRoomId(newRoomId);
     setIsHost(true);
     roomIdRef.current = newRoomId;
+    // Show the host in the lobby immediately; the server will confirm the full room list.
+    setPlayers([{ id: clientIdRef.current, username: username.trim(), score: 0 }]);
     socket.emit("create_room", { roomId: newRoomId, hostName: username, clientId: clientIdRef.current });
     setRoomState("waiting");
   };
@@ -136,7 +138,7 @@ export function QuizApp() {
   };
 
   const generateAndStartQuiz = async () => {
-    if (!socket || !isHost || !topic.trim()) return;
+    if (!socket || !isHost || !topic.trim() || isGenerating) return;
     setIsGenerating(true);
     
     // Call our AI API route to generate questions
@@ -347,7 +349,7 @@ export function QuizApp() {
                         </div>
                         <Button 
                           onClick={generateAndStartQuiz} 
-                          disabled={isGenerating || !topic || players.length < 1} 
+                          disabled={isGenerating || !topic.trim()} 
                           className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg"
                         >
                           {isGenerating ? (
