@@ -30,7 +30,7 @@ export function QuizApp() {
   const [topic, setTopic] = useState("");
   const [difficulty, setDifficulty] = useState("Medium");
   const [numQuestions, setNumQuestions] = useState(5);
-  const [timeLimit, setTimeLimit] = useState(15);
+  const [timeLimit, setTimeLimit] = useState("");
   const [timeRemaining, setTimeRemaining] = useState(15);
   const [roomTimeLimit, setRoomTimeLimit] = useState(15);
   const [timedOut, setTimedOut] = useState(false);
@@ -138,7 +138,7 @@ export function QuizApp() {
   };
 
   const generateAndStartQuiz = async () => {
-    if (!socket || !isHost || !topic.trim() || isGenerating) return;
+    if (!socket || !isHost || !topic.trim() || !timeLimit.trim() || !Number.isInteger(Number(timeLimit)) || Number(timeLimit) < 5 || Number(timeLimit) > 120 || isGenerating) return;
     setIsGenerating(true);
     
     // Call our AI API route to generate questions
@@ -157,7 +157,7 @@ export function QuizApp() {
       }
 
       if (Array.isArray(data.questions) && data.questions.length > 0) {
-        socket.emit("quiz_started", { roomId, questions: data.questions, timeLimit });
+        socket.emit("quiz_started", { roomId, questions: data.questions, timeLimit: Number(timeLimit) });
       } else {
         window.alert("Gemini returned no questions. Please try again.");
       }
@@ -341,15 +341,17 @@ export function QuizApp() {
                               type="number"
                               min={5}
                               max={120}
+                              required
+                              placeholder="Enter seconds (5–120)"
                               value={timeLimit}
-                              onChange={(e) => setTimeLimit(Math.max(5, Math.min(120, parseInt(e.target.value) || 5)))}
+                              onChange={(e) => setTimeLimit(e.target.value)}
                               className="bg-zinc-900 border-zinc-700 text-slate-100"
                             />
                           </div>
                         </div>
                         <Button 
                           onClick={generateAndStartQuiz} 
-                          disabled={isGenerating || !topic.trim()} 
+                          disabled={isGenerating || !topic.trim() || !timeLimit.trim() || !Number.isInteger(Number(timeLimit)) || Number(timeLimit) < 5 || Number(timeLimit) > 120} 
                           className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg"
                         >
                           {isGenerating ? (
